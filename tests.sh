@@ -181,6 +181,7 @@ do
     # stop the tomcat
     echo "tomcat${PORT} being stopped"
     docker stop tomcat${PORT}
+    docker container rm tomcat${PORT}
   fi
   i=`expr $i + 1`
 done
@@ -188,3 +189,13 @@ if [ ${CODE} != "200" ]; then
   echo "Something was wrong... got: ${CODE}"
   exit 1
 fi
+
+# restart the tomcat
+nohup docker run --network=host -e tomcat_port=${PORT} --name tomcat${PORT} docker.io/kimonides/tomcat_mod_cluster &
+
+# now try to test the websocket
+mvn dependency:copy -Dartifact=org.apache.tomcat:websocket-hello:0.0.1:war  -DoutputDirectory=.
+docker cp websocket-hello-0.0.1.war tomcat8080:/usr/local/tomcat/webapps
+docker cp websocket-hello-0.0.1.war tomcat8081:/usr/local/tomcat/webapps
+sleep 10
+java -jar target/test-1.0.jar
