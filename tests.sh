@@ -199,3 +199,13 @@ docker cp websocket-hello-0.0.1.war tomcat8080:/usr/local/tomcat/webapps
 docker cp websocket-hello-0.0.1.war tomcat8081:/usr/local/tomcat/webapps
 sleep 10
 java -jar target/test-1.0.jar
+if [ $? -ne 0 ]; then
+  echo "Something was wrong... with websocket tests"
+  exit 1
+fi
+
+# cleanup at the end
+stoptomcats
+wait0 || exit 1
+removetomcats
+echo "Done!"
