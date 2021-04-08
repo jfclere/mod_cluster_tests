@@ -14,6 +14,11 @@ Build the groovy jar
 ```
 mvn install
 ```
+run the groovy stuff
+```
+java -jar target/test-1.0.jar
+```
+
 # run the tests
 you need an httpd with the mod_cluster.so installed and the following piece in httpd.conf
 ```
