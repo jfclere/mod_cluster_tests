@@ -144,6 +144,10 @@ do
     echo "Can't find the 2 webapps"
     exit 1
   fi
+  if [ "${NEWNODE}" == "" ]; then
+    echo "Can't find node in request"
+    exit 1
+  fi
   echo "trying other webapp try: ${i}"
 done
 echo "${i} try gives: ${NEWCO} node: ${NEWNODE}"
