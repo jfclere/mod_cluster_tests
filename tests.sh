@@ -22,25 +22,27 @@ fi
 }
 
 #
-# Wait the nodes to go away
-wait0 () {
+# Wait the nodes to go away or start
+waitnodes () {
+nodes=$1
 curl -s http://localhost:6666/mod_cluster_manager -o /dev/null
 if [ $? -ne 0 ]; then
   echo "httpd no started or something VERY wrong"
   exit 1
 fi
-NBNODES=2
-while [ ${NBNODES} != 0 ]
+NBNODES=-1
+while [ ${NBNODES} != ${nodes} ]
 do
   NBNODES=`curl -s http://localhost:6666/mod_cluster_manager | grep Node | awk ' { print $3} ' | wc -l`
   sleep 10
-  echo "Wating for the node to go away: `date`"
+  echo "Waiting for ${nodes} node to be ready: `date`"
 done
 curl -s http://localhost:6666/mod_cluster_manager -o /dev/null
 if [ $? -ne 0 ]; then
   echo "httpd no started or something VERY wrong"
   exit 1
 fi
+echo "Waiting for the node DONE: `date`"
 }
 
 #
@@ -70,24 +72,37 @@ echo "2 Tomcats started..."
 }
 
 #
-# Wait until mod_cluster see 2 nodes
-wait2 () {
-NBNODES=0
-while [ ${NBNODES} != 2 ]
-do
-  NBNODES=`curl -s http://localhost:6666/mod_cluster_manager | grep Node | awk ' { print $3} ' | wc -l`
-  sleep 10
-  echo "Wating for 2 node to be up: `date`"
-done
+# Write message do know where we are at
+#
+writemessage() {
+MESS=$1
+echo "***************************************************************"
+echo "Doing test: $MESS"
+echo "***************************************************************"
+}
+
+jdbsuspend() {
+rm -f /tmp/testpipein
+mkfifo /tmp/testpipein
+rm -f /tmp/testpipeout
+mkfifo /tmp/testpipeout
+sleep 10000 > /tmp/testpipein &
+docker exec -it tomcat8080 jdb -attach 6660 < /tmp/testpipein > /tmp/testpipeout &
+echo "suspend" > /tmp/testpipein
+cat < /tmp/testpipeout &
+}
+jdbexit() {
+cat > /tmp/testpipeout &
+echo "exit" > /tmp/testpipein
 }
 
 #
 # main piece
 stoptomcats
-wait0 || exit 1
+waitnodes 0  || exit 1
 removetomcats
 starttomcats || exit 1
-wait2
+waitnodes 2 
 
 #
 # Copy testapp and wait for starting
@@ -95,6 +110,7 @@ docker cp testapp tomcat8081:/usr/local/tomcat/webapps
 sleep 10
 
 # basic 200 and 404 tests.
+writemessage "basic 200 and 404 tests"
 CODE=`curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/testapp/test.jsp`
 if [ ${CODE} != "200" ]; then
   echo "Failed can't rearch webapp"
@@ -108,6 +124,7 @@ fi
 
 #
 # Sticky (yes there is only one app!!!)
+writemessage "sticky one app"
 SESSIONCO=`curl -v http://localhost:8000/testapp/test.jsp -o /dev/null 2>&1 | grep Set-Cookie | awk '{ print $3 } ' | sed 's:;::'`
 if [ "${SESSIONCO}" == "" ];then
   echo "Failed no sessionid in curl output..."
@@ -127,6 +144,7 @@ sleep 10
 
 #
 # Sticky (yes there is now 2 apps
+writemessage "sticky 2 app"
 SESSIONCO=`curl -v http://localhost:8000/testapp/test.jsp -o /dev/null 2>&1 | grep Set-Cookie | awk '{ print $3 } ' | sed 's:;::'`
 NODE=`echo ${SESSIONCO} | awk -F = '{ print $2 }' | awk -F . '{ print $2 }'`
 echo "first: ${SESSIONCO} node: ${NODE}"
@@ -167,7 +185,7 @@ fi
 
 #
 # Stop one of the while running requests.
-echo "stopping one node and doing requests..."
+writemessage "sticky: stopping one node and doing requests..."
 NODE=`echo ${NEWCO} | awk -F = '{ print $2 }' | awk -F . '{ print $2 }'`
 echo $NODE
 PORT=`curl http://localhost:6666/mod_cluster_manager | grep Node | grep $NODE | sed 's:)::' | awk -F : '{ print $3 } '`
@@ -191,6 +209,7 @@ do
 done
 if [ ${CODE} != "200" ]; then
   echo "Something was wrong... got: ${CODE}"
+  curl -v --cookie "${NEWCO}" http://localhost:8000/testapp/test.jsp
   exit 1
 fi
 
@@ -198,9 +217,12 @@ fi
 nohup docker run --network=host -e tomcat_port=${PORT} --name tomcat${PORT} docker.io/kimonides/tomcat_mod_cluster &
 
 # now try to test the websocket
+writemessage "testing websocket"
 mvn dependency:copy -Dartifact=org.apache.tomcat:websocket-hello:0.0.1:war  -DoutputDirectory=.
 docker cp websocket-hello-0.0.1.war tomcat8080:/usr/local/tomcat/webapps
 docker cp websocket-hello-0.0.1.war tomcat8081:/usr/local/tomcat/webapps
+# Put the testapp in the  tomcat we restarted.
+docker cp testapp tomcat${PORT}:/usr/local/tomcat/webapps
 sleep 10
 java -jar target/test-1.0.jar
 if [ $? -ne 0 ]; then
@@ -208,8 +230,69 @@ if [ $? -ne 0 ]; then
   exit 1
 fi
 
+#
+# check that hanging tomcat will be removed
+#
+writemessage "hanging a tomcat checking it is removed after a while no requests"
+PORT=8080
+docker cp setenv.sh tomcat${PORT}:/usr/local/tomcat/bin
+docker commit tomcat${PORT} docker.io/kimonides/tomcat_mod_cluster-debug
+docker stop tomcat${PORT}
+docker container rm tomcat${PORT}
+waitnodes 1 
+# start the node.
+nohup docker run --network=host -e tomcat_port=${PORT} --name tomcat${PORT} docker.io/kimonides/tomcat_mod_cluster-debug &
+sleep 10
+docker exec tomcat8080 jdb -attach 6660 < continue.txt
+waitnodes 2  || exit 1
+echo "2 tomcat started"
+# hang the node.
+# jdb and a pipe to hang the tomcat.
+jdbsuspend
+waitnodes 1  || exit 1
+echo "1 tomcat hanging and gone"
+jdbexit
+# the tomcat is comming up again
+waitnodes 2  || exit 1
+echo "the tomcat is back"
+
+# same test with requests
+# do requests in a loop
+writemessage "hanging tomcat removed after a while with requests"
+bash curlloop.sh 200 1 &
+jdbsuspend
+waitnodes 1  || exit 1
+ps -ef | grep curlloop | grep -v grep
+if [ $? -ne 0 ]; then
+  echo "curlloop.sh FAILED!"
+  exit 1
+fi
+ps -ef | grep curlloop | grep -v grep | awk ' { print $2 } ' | xargs kill
+jdbexit
+# the tomcat is comming up again
+waitnodes 2  || exit 1
+
+# same test with requets but stop the other tomcat
+writemessage "single hanging tomcat removed after a while with requests"
+PORT=8081
+docker stop tomcat${PORT}
+docker container rm tomcat${PORT}
+waitnodes 1  || exit 1
+jdbsuspend
+bash curlloop.sh 503 1 &
+waitnodes 0  || exit 1
+ps -ef | grep curlloop | grep -v grep
+if [ $? -ne 0 ]; then
+  echo "curlloop.sh FAILED!"
+  exit 1
+fi
+ps -ef | grep curlloop | grep -v grep | awk ' { print $2 } ' | xargs kill
+jdbexit
+# the tomcat is comming up again
+waitnodes 1  || exit 1
+
 # cleanup at the end
 stoptomcats
-wait0 || exit 1
+waitnodes 0  || exit 1
 removetomcats
 echo "Done!"
