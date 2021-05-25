@@ -68,6 +68,11 @@
   </build>
   <dependencies>
     <dependency>
+      <groupId>net.sourceforge.htmlunit</groupId>
+      <artifactId>htmlunit</artifactId>
+      <version>2.50.0</version>
+    </dependency>
+    <dependency>
       <groupId>com.ning</groupId>
       <artifactId>async-http-client</artifactId>
       <version>1.9.38</version>

@@ -224,9 +224,20 @@ docker cp websocket-hello-0.0.1.war tomcat8081:/usr/local/tomcat/webapps
 # Put the testapp in the  tomcat we restarted.
 docker cp testapp tomcat${PORT}:/usr/local/tomcat/webapps
 sleep 10
-java -jar target/test-1.0.jar
+java -jar target/test-1.0.jar WebSocketsTest
 if [ $? -ne 0 ]; then
   echo "Something was wrong... with websocket tests"
+  exit 1
+fi
+
+#
+# Test a keepalived connection finds the 2 webapps on each tomcat
+docker cp testapp tomcat8080:/usr/local/tomcat/webapps/testapp1
+docker cp testapp tomcat8081:/usr/local/tomcat/webapps/testapp2
+sleep 10
+java -jar target/test-1.0.jar HTTPTest
+if [ $? -ne 0 ]; then
+  echo "Something was wrong... with HTTP tests"
   exit 1
 fi
 
