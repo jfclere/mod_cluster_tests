@@ -113,7 +113,7 @@ sleep 10
 writemessage "basic 200 and 404 tests"
 CODE=`curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/testapp/test.jsp`
 if [ ${CODE} != "200" ]; then
-  echo "Failed can't rearch webapp"
+  echo "Failed can't reach webapp: ${CODE}"
   exit 1
 fi
 CODE=`curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/testapp/toto.jsp`
@@ -158,7 +158,7 @@ do
   NEWCO=`curl -v http://localhost:8000/testapp/test.jsp -o /dev/null 2>&1 | grep Set-Cookie | awk '{ print $3 } ' | sed 's:;::'`
   NEWNODE=`echo ${NEWCO} | awk -F = '{ print $2 }' | awk -F . '{ print $2 }'`
   i=`expr $i + 1`
-  if [ $i -gt 20 ]; then
+  if [ $i -gt 40 ]; then
     echo "Can't find the 2 webapps"
     exit 1
   fi
@@ -167,6 +167,7 @@ do
     exit 1
   fi
   echo "trying other webapp try: ${i}"
+  sleep 1
 done
 echo "${i} try gives: ${NEWCO} node: ${NEWNODE}"
 
@@ -232,12 +233,58 @@ fi
 
 #
 # Test a keepalived connection finds the 2 webapps on each tomcat
+writemessage "Testing keepalived with 2 webapps on each tomcat"
 docker cp testapp tomcat8080:/usr/local/tomcat/webapps/testapp1
 docker cp testapp tomcat8081:/usr/local/tomcat/webapps/testapp2
 sleep 10
 java -jar target/test-1.0.jar HTTPTest
 if [ $? -ne 0 ]; then
   echo "Something was wrong... with HTTP tests"
+  exit 1
+fi
+
+#
+# Test virtual host
+writemessage "Testing virtual hosts"
+docker cp tomcat8081:/usr/local/tomcat/conf/server.xml .
+sed '/Host name=.*/i <Host name=\"example.com\"  appBase="examples" />' server.xml > new.xml
+docker cp new.xml tomcat8081:/usr/local/tomcat/conf/server.xml
+docker cp examples tomcat8081:/usr/local/tomcat
+docker commit tomcat8081 docker.io/kimonides/tomcat_mod_cluster-examples
+docker stop tomcat8081
+docker container rm tomcat8081
+waitnodes 1 
+# start the node.
+nohup docker run --network=host -e tomcat_port=8081 --name tomcat8081 docker.io/kimonides/tomcat_mod_cluster-examples &
+waitnodes 2  || exit 1
+# basically curl --header "Host: example.com" http://127.0.0.1:8000/test/test.jsp gives 200
+# in fact the headers are:
+# X-Forwarded-For: 127.0.0.1
+# X-Forwarded-Host: example.com
+# X-Forwarded-Server: fe80::faf4:935b:9dda:2adf
+# therefore don't forget ProxyPreserveHost On (otherwise UseAlias failed...)
+#
+CODE=`curl -s -o /dev/null -w "%{http_code}" --header "Host: example.com" http://127.0.0.1:8000/test/test.jsp`
+if [ ${CODE} != "200" ]; then
+  echo "Failed can't rearch webapp at example.com: ${CODE}"
+  exit 1
+fi
+# basically curl --header "Host: localhost" http://127.0.0.1:8000/test/test.jsp gives 400
+CODE=`curl -s -o /dev/null -w "%{http_code}" --header "Host: localhost" http://127.0.0.1:8000/test/test.jsp`
+if [ ${CODE} != "404" ]; then
+  echo "Failed should NOT rearch webapp at localhost: ${CODE}"
+  exit 1
+fi
+# same using localhost/testapp2 and curl --header "Host: localhost" http://127.0.0.1:8000/testapp2/test.jsp
+CODE=`curl -s -o /dev/null -w "%{http_code}" --header "Host: localhost" http://127.0.0.1:8000/testapp2/test.jsp`
+if [ ${CODE} != "200" ]; then
+  echo "Failed can't rearch webapp at localhost: ${CODE}"
+  exit 1
+fi
+# basically curl --header "Host: example.com" http://127.0.0.1:8000/testapp2/test.jsp gives 400
+CODE=`curl -s -o /dev/null -w "%{http_code}" --header "Host: example.com" http://127.0.0.1:8000/testapp2/test.jsp`
+if [ ${CODE} != "404" ]; then
+  echo "Failed should NOT rearch webapp at localhost: ${CODE}"
   exit 1
 fi
 
@@ -270,7 +317,7 @@ echo "the tomcat is back"
 # same test with requests
 # do requests in a loop
 writemessage "hanging tomcat removed after a while with requests"
-bash curlloop.sh 200 1 &
+bash curlloop.sh 200 000 &
 jdbsuspend
 waitnodes 1  || exit 1
 ps -ef | grep curlloop | grep -v grep
@@ -290,7 +337,8 @@ docker stop tomcat${PORT}
 docker container rm tomcat${PORT}
 waitnodes 1  || exit 1
 jdbsuspend
-bash curlloop.sh 503 1 &
+sleep 10
+bash curlloop.sh 000 404 503 &
 waitnodes 0  || exit 1
 ps -ef | grep curlloop | grep -v grep
 if [ $? -ne 0 ]; then
