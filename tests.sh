@@ -31,11 +31,17 @@ if [ $? -ne 0 ]; then
   exit 1
 fi
 NBNODES=-1
+i=0
 while [ ${NBNODES} != ${nodes} ]
 do
   NBNODES=`curl -s http://localhost:6666/mod_cluster_manager | grep Node | awk ' { print $3} ' | wc -l`
   sleep 10
   echo "Waiting for ${nodes} node to be ready: `date`"
+  i=`expr $i + 1`
+  if [ $i -gt 120 ]; then
+    echo "Timeout the node(s) number is NOT ${nodes} but ${NBNODES}"
+    exit 1
+  fi
 done
 curl -s http://localhost:6666/mod_cluster_manager -o /dev/null
 if [ $? -ne 0 ]; then
@@ -102,7 +108,7 @@ stoptomcats
 waitnodes 0  || exit 1
 removetomcats
 starttomcats || exit 1
-waitnodes 2 
+waitnodes 2  || exit 1
 
 #
 # Copy testapp and wait for starting
@@ -262,7 +268,7 @@ waitnodes 2  || exit 1
 # X-Forwarded-For: 127.0.0.1
 # X-Forwarded-Host: example.com
 # X-Forwarded-Server: fe80::faf4:935b:9dda:2adf
-# therefore don't forget ProxyPreserveHost On (otherwise UseAlias failed...)
+# therefore don't forget ProxyPreserveHost On (otherwise UseAlias On failed...)
 #
 CODE=`curl -s -o /dev/null -w "%{http_code}" --header "Host: example.com" http://127.0.0.1:8000/test/test.jsp`
 if [ ${CODE} != "200" ]; then
@@ -289,19 +295,49 @@ if [ ${CODE} != "404" ]; then
 fi
 
 #
+# Shutdown the 2 tomcats
+docker exec -it tomcat8080 /usr/local/tomcat/bin/shutdown.sh
+docker exec -it tomcat8081 /usr/local/tomcat/bin/shutdown.sh
+waitnodes 0 
+docker container rm tomcat8080
+docker container rm tomcat8081
+
+#
+# Loop stopping starting the same tomcat
+iter=0
+while [ $iter -lt 50 ]
+do
+   echo "Loop stopping starting the same tomcat iter: $iter"
+   nohup docker run --network=host -e tomcat_port=8080 --name tomcat8080 docker.io/kimonides/tomcat_mod_cluster &
+   sleep 10
+   waitnodes 1 || exit 1
+   docker exec -it tomcat8080 /usr/local/tomcat/bin/shutdown.sh
+   waitnodes 0 || exit 1
+   docker container rm tomcat8080
+   iter=`expr $iter + 1`
+done 
+docker container rm tomcat8080
+docker container rm tomcat8081
+
+#
 # check that hanging tomcat will be removed
 #
 writemessage "hanging a tomcat checking it is removed after a while no requests"
+PORT=8081
+nohup docker run --network=host -e tomcat_port=${PORT} --name tomcat${PORT} docker.io/kimonides/tomcat_mod_cluster &
 PORT=8080
+nohup docker run --network=host -e tomcat_port=${PORT} --name tomcat${PORT} docker.io/kimonides/tomcat_mod_cluster &
+sleep 10
+waitnodes 2 || exit 1
 docker cp setenv.sh tomcat${PORT}:/usr/local/tomcat/bin
 docker commit tomcat${PORT} docker.io/kimonides/tomcat_mod_cluster-debug
 docker stop tomcat${PORT}
-docker container rm tomcat${PORT}
 waitnodes 1 
+docker container rm tomcat${PORT}
 # start the node.
 nohup docker run --network=host -e tomcat_port=${PORT} --name tomcat${PORT} docker.io/kimonides/tomcat_mod_cluster-debug &
 sleep 10
-docker exec tomcat8080 jdb -attach 6660 < continue.txt
+docker exec tomcat${PORT} jdb -attach 6660 < continue.txt
 waitnodes 2  || exit 1
 echo "2 tomcat started"
 # hang the node.
