@@ -1,6 +1,8 @@
 # mod_cluster_tests
 Tests using docker/podman to test mod_cluster
 
+The docker images are built from https://github.com/kimonides/tomcat_mod_cluster
+
 # testing websocket
 Using com.ning.http.client.ws.WebSocketTextListener
 To be able to run the test please use https://github.com/jfclere/httpd_websocket just build it:
