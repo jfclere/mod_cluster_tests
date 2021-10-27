@@ -42,6 +42,13 @@ do
     echo "Timeout the node(s) number is NOT ${nodes} but ${NBNODES}"
     exit 1
   fi
+  # check if the nodes are OK
+  if [ ${NBNODES} = ${nodes} ]; then
+    NBNODESOK=`curl -s http://localhost:6666/mod_cluster_manager | grep "Status: OK" | wc -l`
+    if [ $NBNODESOK != ${nodes} ]; then
+      echo "Some nodes are not in OK state..."
+    fi
+  fi
 done
 curl -s http://localhost:6666/mod_cluster_manager -o /dev/null
 if [ $? -ne 0 ]; then
@@ -62,14 +69,14 @@ docker container rm tomcat8080
 # Start them again
 starttomcats() {
 echo "Starting tomcat8080..."
-nohup docker run --network=host -e tomcat_port=8080 --name tomcat8080 docker.io/kimonides/tomcat_mod_cluster &
+nohup docker run --network=host -e tomcat_port=8080 --name tomcat8080 docker.io/${USER}/tomcat_mod_cluster &
 if [ $? -ne 0 ]; then
   echo "Can't start tomcat8080"
   exit 1
 fi
 sleep 10
 echo "Starting tomcat8081..."
-nohup docker run --network=host -e tomcat_port=8081 --name tomcat8081 docker.io/kimonides/tomcat_mod_cluster &
+nohup docker run --network=host -e tomcat_port=8081 --name tomcat8081 docker.io/${USER}/tomcat_mod_cluster &
 if [ $? -ne 0 ]; then
   echo "Can't start tomcat8081"
   exit 1
@@ -102,11 +109,146 @@ cat > /tmp/testpipeout &
 echo "exit" > /tmp/testpipein
 }
 
+# start tomcat$1 on 127.0.0.$1
+starttomcat() {
+nohup docker run --network=host -e tomcat_ajp_port=8080 -e tomcat_address=127.0.0.$1 -e tomcat_shutdown_port=8005 -e jvmroute=tomcat$1 --name tomcat$1 docker.io/${USER}/tomcat_mod_cluster:latest &
+sleep 1
+docker cp testapp tomcat$1:/usr/local/tomcat/webapps/tomcat$1
+}
+# shutdown tomcat$1
+shutdowntomcat() {
+echo "SHUTDOWN" | nc 127.0.0.$1 8005
+}
+# remove the docker image tomcat$1
+removetomcat() {
+docker rm tomcat$1
+}
+# test the webapp is working
+testtomcat() {
+CODE=`curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/tomcat$1/test.jsp`
+if [ ${CODE} != "200" ]; then
+  echo "Failed can't reach $tomcat$1: ${CODE}"
+  exit 1
+fi
+}
+
+# start a bunch (6) of tomcat, test them and stop them
+# $1 is the number of nodes are the start
+cycletomcats() {
+t=5
+while true
+do
+  starttomcat $t
+  t=`expr $t + 1`
+  if [ $t -gt 10 ]; then
+    break
+  fi
+done
+waitnodes 10  || exit 1
+
+# test the tomcats
+t=2
+while true
+do
+  testtomcat $t || exit 1
+  t=`expr $t + 1`
+  if [ $t -gt 10 ]; then
+    break
+  fi
+done
+
+# stop the tomcats
+t=5
+while true
+do
+  shutdowntomcat $t
+  t=`expr $t + 1`
+  if [ $t -gt 10 ]; then
+    break
+  fi
+done
+waitnodes 3  || exit 1
+
+# remove the tomcats
+t=5
+while true
+do
+  removetomcat $t
+  t=`expr $t + 1`
+  if [ $t -gt 10 ]; then
+    break
+  fi
+done
+}
+
+# run test for https://issues.redhat.com/browse/JBCS-1236
+# basically start and stop random tomcats...
+runjbcs1236() {
+# start 3 tomcats
+starttomcat 2
+waitnodes 1  || exit 1
+starttomcat 3
+waitnodes 2  || exit 1
+starttomcat 4
+waitnodes 3  || exit 1
+# check them
+testtomcat 2 || exit 1
+testtomcat 3 || exit 1
+testtomcat 4 || exit 1
+
+# stop the first one and remplace it by a new one.
+i=0
+while true
+do
+i=`expr $i + 1`
+if [ $i -gt 40 ]; then
+  echo "Looks OK, stopping!"
+fi
+shutdowntomcat 2
+waitnodes 2  || exit 1
+removetomcat 2
+starttomcat 5
+waitnodes 3  || exit 1
+testtomcat 5 || exit 1
+# we have 5 3 4 in shared memory
+# readd 2
+starttomcat 2
+waitnodes 4  || exit 1
+testtomcat 2 || exit 1
+# we have 5 3 4 2 in shared memory
+# if something was wrong 2 points to 5
+shutdowntomcat 5
+waitnodes 3  || exit 1
+removetomcat 5
+testtomcat 2 || exit 1
+testtomcat 3 || exit 1
+testtomcat 4 || exit 1
+done
+
+# cleanup
+shutdowntomcat 4
+shutdowntomcat 3
+shutdowntomcat 2
+waitnodes 0  || exit 1
+removetomcat 2
+removetomcat 3
+removetomcat 4
+
+}
+
 #
 # main piece
+# first cleanup.
 stoptomcats
 waitnodes 0  || exit 1
 removetomcats
+
+# JBCS-1236
+writemessage "JBCS-1236"
+runjbcs1236 || exit 1
+exit 0
+
+# start 2 tomcats.
 starttomcats || exit 1
 waitnodes 2  || exit 1
 
@@ -221,7 +363,7 @@ if [ ${CODE} != "200" ]; then
 fi
 
 # restart the tomcat
-nohup docker run --network=host -e tomcat_port=${PORT} --name tomcat${PORT} docker.io/kimonides/tomcat_mod_cluster &
+nohup docker run --network=host -e tomcat_port=${PORT} --name tomcat${PORT} docker.io/${USER}/tomcat_mod_cluster &
 
 # now try to test the websocket
 writemessage "testing websocket"
@@ -256,12 +398,12 @@ docker cp tomcat8081:/usr/local/tomcat/conf/server.xml .
 sed '/Host name=.*/i <Host name=\"example.com\"  appBase="examples" />' server.xml > new.xml
 docker cp new.xml tomcat8081:/usr/local/tomcat/conf/server.xml
 docker cp examples tomcat8081:/usr/local/tomcat
-docker commit tomcat8081 docker.io/kimonides/tomcat_mod_cluster-examples
+docker commit tomcat8081 docker.io/${USER}/tomcat_mod_cluster-examples
 docker stop tomcat8081
 docker container rm tomcat8081
 waitnodes 1 
 # start the node.
-nohup docker run --network=host -e tomcat_port=8081 --name tomcat8081 docker.io/kimonides/tomcat_mod_cluster-examples &
+nohup docker run --network=host -e tomcat_port=8081 --name tomcat8081 docker.io/${USER}/tomcat_mod_cluster-examples &
 waitnodes 2  || exit 1
 # basically curl --header "Host: example.com" http://127.0.0.1:8000/test/test.jsp gives 200
 # in fact the headers are:
@@ -308,7 +450,7 @@ iter=0
 while [ $iter -lt 50 ]
 do
    echo "Loop stopping starting the same tomcat iter: $iter"
-   nohup docker run --network=host -e tomcat_port=8080 --name tomcat8080 docker.io/kimonides/tomcat_mod_cluster &
+   nohup docker run --network=host -e tomcat_port=8080 --name tomcat8080 docker.io/${USER}/tomcat_mod_cluster &
    sleep 10
    waitnodes 1 || exit 1
    docker exec -it tomcat8080 /usr/local/tomcat/bin/shutdown.sh
@@ -324,18 +466,18 @@ docker container rm tomcat8081
 #
 writemessage "hanging a tomcat checking it is removed after a while no requests"
 PORT=8081
-nohup docker run --network=host -e tomcat_port=${PORT} --name tomcat${PORT} docker.io/kimonides/tomcat_mod_cluster &
+nohup docker run --network=host -e tomcat_port=${PORT} --name tomcat${PORT} docker.io/${USER}/tomcat_mod_cluster &
 PORT=8080
-nohup docker run --network=host -e tomcat_port=${PORT} --name tomcat${PORT} docker.io/kimonides/tomcat_mod_cluster &
+nohup docker run --network=host -e tomcat_port=${PORT} --name tomcat${PORT} docker.io/${USER}/tomcat_mod_cluster &
 sleep 10
 waitnodes 2 || exit 1
 docker cp setenv.sh tomcat${PORT}:/usr/local/tomcat/bin
-docker commit tomcat${PORT} docker.io/kimonides/tomcat_mod_cluster-debug
+docker commit tomcat${PORT} docker.io/${USER}/tomcat_mod_cluster-debug
 docker stop tomcat${PORT}
 waitnodes 1 
 docker container rm tomcat${PORT}
 # start the node.
-nohup docker run --network=host -e tomcat_port=${PORT} --name tomcat${PORT} docker.io/kimonides/tomcat_mod_cluster-debug &
+nohup docker run --network=host -e tomcat_port=${PORT} --name tomcat${PORT} docker.io/${USER}/tomcat_mod_cluster-debug &
 sleep 10
 docker exec tomcat${PORT} jdb -attach 6660 < continue.txt
 waitnodes 2  || exit 1
