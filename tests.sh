@@ -47,6 +47,7 @@ do
     NBNODESOK=`curl -s http://localhost:6666/mod_cluster_manager | grep "Status: OK" | wc -l`
     if [ $NBNODESOK != ${nodes} ]; then
       echo "Some nodes are not in OK state..."
+      exit 1
     fi
   fi
 done
@@ -112,8 +113,10 @@ echo "exit" > /tmp/testpipein
 # start tomcat$1 on 127.0.0.$1
 starttomcat() {
 nohup docker run --network=host -e tomcat_ajp_port=8080 -e tomcat_address=127.0.0.$1 -e tomcat_shutdown_port=8005 -e jvmroute=tomcat$1 --name tomcat$1 docker.io/${USER}/tomcat_mod_cluster:latest &
-sleep 1
-docker cp testapp tomcat$1:/usr/local/tomcat/webapps/tomcat$1
+}
+# start the webapp on the tomcat
+startwebapptomcat() {
+docker cp testapp tomcat$1:/usr/local/tomcat/webapps/tomcat$1 || exit 1
 }
 # shutdown tomcat$1
 shutdowntomcat() {
@@ -131,6 +134,44 @@ if [ ${CODE} != "200" ]; then
   exit 1
 fi
 }
+# load test tomcat with ab
+abtomcat() {
+  ab -c10 -n10 http://localhost:8000/tomcat$1/test.jsp > /dev/null
+  if [ $? -ne 0 ]; then
+    echo "Loading tomcat$1 failed"
+    exit 1
+  fi
+}
+# test the tomcats
+# for each tomcat we do a "short loadtest"
+abtomcats() {
+tc=2
+while true
+do
+  ab -c10 -n10 http://localhost:8000/tomcat$tc/test.jsp
+  if [ $? -ne 0 ]; then
+    echo "Loading tomcat$tc failed"
+    exit 1
+  fi
+  tc=`expr $tc + 1`
+  if [ $tc -gt $1 ]; then
+    break
+  fi
+done
+}
+
+# test the tomcats
+testtomcats() {
+tc=2
+while true
+do
+  testtomcat $tc || exit 1
+  tc=`expr $tc + 1`
+  if [ $tc -gt $1 ]; then
+    break
+  fi
+done
+}
 
 # start a bunch (6) of tomcat, test them and stop them
 # $1 is the number of nodes are the start
@@ -144,18 +185,26 @@ do
     break
   fi
 done
-waitnodes 10  || exit 1
-
-# test the tomcats
-t=2
+waitnodes 9  || exit 1
+t=5
 while true
 do
-  testtomcat $t || exit 1
+  startwebapptomcat $t || exit 1
   t=`expr $t + 1`
   if [ $t -gt 10 ]; then
     break
   fi
 done
+
+# test the tomcats
+sleep 10
+testtomcats 9 || exit 1
+
+# "load test" 9 of them
+abtomcats 9 || exit 1
+
+# retest
+testtomcats 9 || exit 1
 
 # stop the tomcats
 t=5
@@ -181,22 +230,118 @@ do
 done
 }
 
+# single tomcat testing
+# we start the tomcat, put the webapp, test it and later stop and clean up
+singlecycle() {
+  echo "Testing tomcat$1"
+  starttomcat $1 || exit 1
+  # Wait for it to start
+  while true
+  do
+    curl -s http://localhost:6666/mod_cluster_manager | grep Node | grep tomcat$1 > /dev/null
+    if [ $? -eq 0 ]; then
+      break
+    fi
+    sleep 1
+  done
+  startwebapptomcat $1 || exit 1
+  echo "Testing(0) tomcat$1"
+  while true
+  do
+    curl -s http://localhost:6666/mod_cluster_manager | grep /tomcat$1 > /dev/null
+    if [ $? -eq 0 ]; then
+      break
+    fi
+    curl -s http://localhost:6666/mod_cluster_manager | grep /tomcat$1
+    sleep 1
+  done
+  echo "Testing(1) tomcat$1"
+  testtomcat $1 || exit 1
+  echo "Testing(2) tomcat$1"
+  testtomcat $1 || exit 1
+  abtomcat $1 || exit 1
+  echo "Testing(3) tomcat$1"
+  shutdowntomcat $1 || exit 1
+  while true
+  do
+    curl -s http://localhost:6666/mod_cluster_manager | grep Node | grep $1 > /dev/null
+    if [ $? -ne 0 ]; then
+      break
+    fi
+    sleep 1
+  done
+  removetomcat $1 || exit 1
+  echo "Done tomcat$1"
+}
+
+# loop testing single tomcat
+singleloopcycle() {
+  while true
+  do
+    singlecycle $1 || exit 1
+  done
+}
+
+# start a bunch of looping tomcats and kill them
+forevertomcat() {
+(singleloopcycle 12) &
+pid12=$!
+(singleloopcycle 13) &
+pid13=$!
+# wait a little to prevent synchronization
+sleep 5
+(singleloopcycle 14) &
+pid14=$!
+(singleloopcycle 15) &
+pid15=$!
+(singleloopcycle 16) &
+pid16=$!
+sleep 3600
+kill -15 $pid12 $pid13 $pid14 $pid15 $pid16
+if [ $? -ne 0 ]; then
+  echo "kill -15 $pid12 $pid13 $pid14 $pid15 $pid16 failed"
+  exit 1
+fi
+echo "Tests done, cleaning"
+# shutdown
+shutdowntomcat 12
+shutdowntomcat 13
+shutdowntomcat 14
+shutdowntomcat 15
+shutdowntomcat 16
+sleep 10
+# stop the containers
+docker stop tomcat12
+docker stop tomcat13
+docker stop tomcat14
+docker stop tomcat15
+docker stop tomcat16
+# remove the containers
+docker rm tomcat12
+docker rm tomcat13
+docker rm tomcat14
+docker rm tomcat15
+docker rm tomcat16
+}
+
 # run test for https://issues.redhat.com/browse/JBCS-1236
 # basically start and stop random tomcats...
 runjbcs1236() {
 # start 3 tomcats
 starttomcat 2
-waitnodes 1  || exit 1
 starttomcat 3
-waitnodes 2  || exit 1
 starttomcat 4
 waitnodes 3  || exit 1
 # check them
+startwebapptomcat 2 || exit 1
+startwebapptomcat 3 || exit 1
+startwebapptomcat 4 || exit 1
+sleep 10
 testtomcat 2 || exit 1
 testtomcat 3 || exit 1
 testtomcat 4 || exit 1
 
-# stop the first one and remplace it by a new one.
+# start a bunch of tomcats, test, shutdown, remove and try in a loop.
 i=0
 while true
 do
@@ -204,16 +349,22 @@ i=`expr $i + 1`
 if [ $i -gt 40 ]; then
   echo "Looks OK, stopping!"
 fi
+# cycle the tomcats
+cycletomcats || exit 1
 shutdowntomcat 2
 waitnodes 2  || exit 1
 removetomcat 2
 starttomcat 5
 waitnodes 3  || exit 1
+startwebapptomcat 5 || exit 1
+sleep 10
 testtomcat 5 || exit 1
 # we have 5 3 4 in shared memory
 # readd 2
 starttomcat 2
 waitnodes 4  || exit 1
+startwebapptomcat 2 || exit 1
+sleep 10
 testtomcat 2 || exit 1
 # we have 5 3 4 2 in shared memory
 # if something was wrong 2 points to 5
@@ -245,6 +396,8 @@ removetomcats
 
 # JBCS-1236
 writemessage "JBCS-1236"
+forevertomcat || exit 1
+exit 0
 runjbcs1236 || exit 1
 exit 0
 
