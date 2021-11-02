@@ -112,7 +112,12 @@ echo "exit" > /tmp/testpipein
 
 # start tomcat$1 on 127.0.0.$1
 starttomcat() {
-nohup docker run --network=host -e tomcat_ajp_port=8080 -e tomcat_address=127.0.0.$1 -e tomcat_shutdown_port=8005 -e jvmroute=tomcat$1 --name tomcat$1 docker.io/${USER}/tomcat_mod_cluster:latest &
+ADDR="127.0.0.$1"
+if [ $2 -ne 0 ];then
+  echo "Starting tomcat$1 on 127.0.0.$2"
+  ADDR="127.0.0.$2"
+fi
+nohup docker run --network=host -e tomcat_ajp_port=8080 -e tomcat_address=$ADDR -e tomcat_shutdown_port=8005 -e jvmroute=tomcat$1 --name tomcat$1 docker.io/${USER}/tomcat_mod_cluster:latest &
 }
 # start the webapp on the tomcat
 startwebapptomcat() {
@@ -179,7 +184,7 @@ cycletomcats() {
 t=5
 while true
 do
-  starttomcat $t
+  starttomcat $t 0
   t=`expr $t + 1`
   if [ $t -gt 10 ]; then
     break
@@ -234,7 +239,14 @@ done
 # we start the tomcat, put the webapp, test it and later stop and clean up
 singlecycle() {
   echo "Testing tomcat$1"
-  starttomcat $1 || exit 1
+  R=$1
+  if [ $2 = "useran" ]; then
+    R=`echo $((1 + $RANDOM % 10))`
+    R=`expr $R + 2`
+    starttomcat $1 $R || exit 1
+  else
+    starttomcat $1 0 || exit 1
+  fi
   # Wait for it to start
   while true
   do
@@ -261,7 +273,7 @@ singlecycle() {
   testtomcat $1 || exit 1
   abtomcat $1 || exit 1
   echo "Testing(3) tomcat$1"
-  shutdowntomcat $1 || exit 1
+  shutdowntomcat $R || exit 1
   while true
   do
     curl -s http://localhost:6666/mod_cluster_manager | grep Node | grep $1 > /dev/null
@@ -322,6 +334,20 @@ docker rm tomcat13
 docker rm tomcat14
 docker rm tomcat15
 docker rm tomcat16
+}
+
+# start one tomcat stop it and start the next one
+cyclestomcats() {
+i=1
+while true
+do
+  i=`expr $i + 1`
+  if [ $i -gt $1 ]; then
+    echo "Looks OK, Done!"
+    break
+  fi
+  singlecycle $i useran || exit 1
+done
 }
 
 # run test for https://issues.redhat.com/browse/JBCS-1236
@@ -396,6 +422,8 @@ removetomcats
 
 # JBCS-1236
 writemessage "JBCS-1236"
+cyclestomcats 100 || exit 1
+exit 0
 forevertomcat || exit 1
 exit 0
 runjbcs1236 || exit 1
